@@ -1,5 +1,3 @@
-
-
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Sphere, Camera, SimulationConfig, Light } from '../types';
 import { fragmentShaderSource, vertexShaderSource } from '../shaders';
@@ -124,7 +122,8 @@ const Raytracer: React.FC<RaytracerProps> = ({ spheresRef, lightsRef, config, ca
   const locationsRef = useRef<any>({});
   const sphereTextureRef = useRef<WebGLTexture | null>(null);
   const textureWidth = 1000;
-  const textureHeight = 20; 
+  // Increased texture height to support up to 30,000 spheres (30000 / 1000 * 2 rows = 60 rows)
+  const textureHeight = 60; 
   const sphereDataArray = useRef(new Float32Array(textureWidth * textureHeight * 4));
 
   useEffect(() => {
@@ -790,27 +789,51 @@ const Raytracer: React.FC<RaytracerProps> = ({ spheresRef, lightsRef, config, ca
         if (sphereTextureRef.current) {
             const data = sphereDataArray.current;
             const rDistSq = (curConfig.renderDistance + 5.0) ** 2;
-            const visibleSpheres = spheres.filter(s => {
-                const dx = s.x - cam.x;
-                const dy = s.y - cam.y;
-                const dz = s.z - cam.z;
-                return (dx*dx + dy*dy + dz*dz) <= rDistSq;
-            });
-
-            for(let i=0; i<visibleSpheres.length && i < 15000; i++) {
-                const s = visibleSpheres[i];
-                const i1 = (Math.floor(i / textureWidth) * 2 * textureWidth + (i % textureWidth)) * 4;
-                const i2 = ((Math.floor(i / textureWidth) * 2 + 1) * textureWidth + (i % textureWidth)) * 4;
-                data[i1] = s.x; data[i1+1] = s.y; data[i1+2] = s.z; data[i1+3] = s.radius;
-                data[i2] = s.r; data[i2+1] = s.g; data[i2+2] = s.b; data[i2+3] = s.reflectivity;
+            
+            // Optimization: Iterate spheres directly and populate Float32Array 
+            // without creating intermediate arrays.
+            let count = 0;
+            const len = spheres.length;
+            const camX = cam.x, camY = cam.y, camZ = cam.z;
+            
+            // Limit loop to max capacity or sphere count
+            for (let i = 0; i < len; i++) {
+                if (count >= 29000) break; // Safety buffer below 30k
+                const s = spheres[i];
+                const dx = s.x - camX;
+                const dy = s.y - camY;
+                const dz = s.z - camZ;
+                
+                if (dx*dx + dy*dy + dz*dz <= rDistSq) {
+                     // Calculate texture indices for 'count'
+                     // The texture is (textureWidth x textureHeight).
+                     // Each sphere takes 2 pixels (2 * 4 floats).
+                     // Row calculation: 
+                     // pixelIndex = count
+                     // col = pixelIndex % textureWidth
+                     // row = floor(pixelIndex / textureWidth)
+                     
+                     const pIdx = count;
+                     const row = Math.floor(pIdx / textureWidth);
+                     const col = pIdx % textureWidth;
+                     
+                     const baseIdx1 = (row * 2 * textureWidth + col) * 4;
+                     const baseIdx2 = ((row * 2 + 1) * textureWidth + col) * 4;
+                     
+                     data[baseIdx1] = s.x; data[baseIdx1+1] = s.y; data[baseIdx1+2] = s.z; data[baseIdx1+3] = s.radius;
+                     data[baseIdx2] = s.r; data[baseIdx2+1] = s.g; data[baseIdx2+2] = s.b; data[baseIdx2+3] = s.reflectivity;
+                     
+                     count++;
+                }
             }
+
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, sphereTextureRef.current);
             gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, textureWidth, textureHeight, gl.RGBA, gl.FLOAT, data);
             gl.uniform1i(locs.u_sphereDataTexture, 0);
             gl.uniform2f(locs.u_sphereTextureSize, textureWidth, textureHeight);
             
-            gl.uniform1i(locs.sphereCount, visibleSpheres.length);
+            gl.uniform1i(locs.sphereCount, count);
         } else {
             gl.uniform1i(locs.sphereCount, 0);
         }

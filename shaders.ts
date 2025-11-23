@@ -1,5 +1,6 @@
 
 
+
 export const vertexShaderSource = `#version 300 es
 in vec4 a_position;
 void main() {
@@ -132,26 +133,34 @@ float fbm(vec3 x) {
 float getRainFactor(vec3 ro, vec3 rd, float t) {
     if (!u_rain) return 0.0;
     float rain = 0.0;
-    float time = u_time * 20.0;
-    for(int i=0; i<3; i++) {
-        float scale = 1.0 + float(i)*0.5;
-        float dist = (3.0 + float(i)*3.0);
+    float time = u_time * 25.0; // Fast fall speed
+    
+    // Use 5 layers spread out to cover more distance
+    for(int i=0; i<5; i++) {
+        // Distances approx: 4, 9, 16, 25, 36...
+        float dist = 4.0 + float(i) * 5.0 + float(i*i)*1.5;
         if (dist > t) break;
         
         vec3 p = ro + rd * dist;
-        p.y += time * scale;
-        p.x += sin(time * 0.1 + float(i));
+        p.y += time * (1.0 + float(i)*0.05); // Fall straight down, distant layers slightly faster/different
+        p.x += time * 0.2; // Constant wind, no sine wave oscillation
         
-        vec3 cell = floor(p * vec3(4.0, 1.0, 4.0));
+        // Thinner (50.0 X/Z scale) and moderate streak length (1.5 Y scale)
+        vec3 gridScale = vec3(50.0, 1.5, 50.0); 
+        
+        vec3 cell = floor(p * gridScale);
         float h = hash(cell);
-        if (h > 0.96) {
-            vec3 local = fract(p * vec3(4.0, 1.0, 4.0));
+        
+        if (h > 0.99) {
+            vec3 local = fract(p * gridScale);
+            // Center the streak to make it thin
             if (local.x > 0.4 && local.x < 0.6 && local.z > 0.4 && local.z < 0.6) {
-                rain += 0.15 / float(i+1);
+                // Fade out distant layers
+                rain += (0.8 / (1.0 + float(i)*0.8));
             }
         }
     }
-    return clamp(rain, 0.0, 0.6);
+    return clamp(rain, 0.0, 1.0);
 }
 
 vec2 hex(vec2 p) {
@@ -419,7 +428,7 @@ Hit traceScene(vec3 ro, vec3 rd) {
             closest.dist = tLaser;
             closest.point = ro + rd * tLaser;
             closest.normal = -rd; 
-            closest.matIndex = -20; 
+            closest.matIndex = -100; 
         }
     }
 
@@ -475,7 +484,7 @@ void getLighting(vec3 p, vec3 n, vec3 viewDir, float reflectivity, float current
 
     if (u_primaryLightEnabled) {
         float ambient = 0.6; 
-        if (u_indirectLighting) ambient += 0.15;
+        if (u_indirectLighting) ambient = 0.05;
 
         if (u_sunFocusEnabled) {
              float radius = max(u_maxDist * 2.0, 500.0);
@@ -501,13 +510,13 @@ void getLighting(vec3 p, vec3 n, vec3 viewDir, float reflectivity, float current
              float sunShadow = 1.0;
              if (u_shadows && !u_water) {
                   Hit h = traceScene(p + n * EPSILON * 5.0, sunLd); 
-                  if (h.dist < sunDist && h.matIndex >= -1) sunShadow = 0.3;
+                  if (h.dist < sunDist && h.matIndex >= -1 && h.matIndex != -100) sunShadow = 0.3;
              }
              float sunDiff = max(dot(n, sunLd), 0.0);
              float sunSpec = pow(max(dot(viewDir, reflect(-sunLd, n)), 0.0), shininess);
              
              diffuseOut += sunDiff * sunColor * sunIntensity * sunAtt * sunShadow;
-             diffuseOut += sunColor * 0.05 * sunIntensity; 
+             diffuseOut += sunColor * ambient * sunIntensity; 
              specularOut += sunSpec * sunColor * sunIntensity * sunAtt * sunShadow;
 
         } else {
@@ -517,7 +526,7 @@ void getLighting(vec3 p, vec3 n, vec3 viewDir, float reflectivity, float current
 
             if (u_shadows && !u_water) {
                 Hit h = traceScene(p + n * EPSILON * 5.0, lightDir);
-                if (h.matIndex != -2 && h.matIndex != -20 && h.dist < 1000.0) shadow = 0.3;
+                if (h.matIndex != -2 && h.matIndex != -100 && h.dist < 1000.0) shadow = 0.3;
             }
 
             float diff = max(dot(n, lightDir), 0.0);
@@ -543,7 +552,7 @@ void getLighting(vec3 p, vec3 n, vec3 viewDir, float reflectivity, float current
         float sh = 1.0;
         if (u_shadows && !u_water) {
             Hit h = traceScene(p + n * EPSILON * 5.0, ld);
-            if (h.dist < dist && h.matIndex > -10 && h.matIndex != -20) sh = 0.3;
+            if (h.dist < dist && h.matIndex > -10 && h.matIndex != -100) sh = 0.3;
         }
         
         float diff = max(dot(n, ld), 0.0);
@@ -555,7 +564,8 @@ void getLighting(vec3 p, vec3 n, vec3 viewDir, float reflectivity, float current
     
     if (u_indirectLighting) {
         vec3 skyAmb = getSky(n);
-        diffuseOut += skyAmb * 0.15; 
+        vec3 ambientColor = clamp(skyAmb, 0.0, 1.0);
+        diffuseOut += ambientColor * 0.2; 
     }
     
     diffuseOut *= occlusion;
@@ -597,6 +607,8 @@ vec3 castRay(vec3 ro, vec3 rd, vec2 uv) {
         fogColor = mix(fogColor, vec3(0.01), darkness);
     }
     
+    float currentDist = 0.0;
+    
     for (int bounce = 0; bounce < 12; bounce++) {
         if (bounce >= u_maxBounces) break;
         Hit hit = traceScene(ro, rd);
@@ -617,7 +629,7 @@ vec3 castRay(vec3 ro, vec3 rd, vec2 uv) {
             col += sky * throughput;
             break;
         }
-        if (hit.matIndex == -20) {
+        if (hit.matIndex == -100) {
              col += vec3(1.0, 0.0, 0.0) * 20.0 * throughput;
              break;
         }
@@ -655,7 +667,14 @@ vec3 castRay(vec3 ro, vec3 rd, vec2 uv) {
         getLighting(hit.point, hit.normal, -rd, reflectivity, currentRoughness, uv.x + float(bounce)*12.32, diffusePart, specularPart);
         
         if (u_fog) {
-             float d = max(hit.dist - u_fogDistance, 0.0); 
+             float segStart = currentDist;
+             float segEnd = currentDist + hit.dist;
+             
+             // Calculate how much of this ray segment is within the "fog zone".
+             // Fog starts at u_fogDistance from the camera.
+             float effectiveDist = max(0.0, segEnd - max(segStart, u_fogDistance));
+             
+             float d = effectiveDist;
              float fogF = 1.0 - exp(-d * baseFogDensity);
              diffusePart = mix(diffusePart, fogColor, fogF);
              specularPart = mix(specularPart, vec3(0.0), fogF); 
@@ -663,6 +682,8 @@ vec3 castRay(vec3 ro, vec3 rd, vec2 uv) {
 
         vec3 combinedLight = diffusePart * matColor * (1.0 - reflectivity) + specularPart * (u_ballTexture == 1 ? matColor : vec3(1.0)) * reflectivity;
         
+        currentDist += hit.dist;
+
         if (u_globalIllumination && reflectivity < 0.1 && bounce < u_maxBounces - 1) {
              col += combinedLight * throughput;
              reflectivity = 0.5; 

@@ -6,9 +6,9 @@ import { ChevronDown, ChevronRight, Droplets, Wind, Activity, RotateCcw, ScanEye
 const DEFAULT_CONFIG: SimulationConfig = {
   raytracingEnabled: false, rayCount: 1, antialiasing: true, maxBounces: 1, renderDistance: 300.0, cameraSpeed: 1.0, 
   rain: false, fog: true, fogDensity: 0.15, fogDistance: 45.0, shadows: true, ambientOcclusion: true, showPerformance: false,
-  reflectionIntensity: 0, gravity: false, groundTexture: 'checker', bounciness: 0.5, attraction: false, blackHole: false, followBall: false, 
+  reflectionIntensity: 0.8, gravity: false, groundTexture: 'checker', bounciness: 0.5, attraction: false, blackHole: false, followBall: false, 
   lookAtBall: false, lockRotation: true, primaryLightEnabled: true, sunFocusEnabled: false, dayNightCycle: false, timeOfDay: 0, lightIntensity: 0.5, resolutionMode: 'native', water: false, waterLevel: -0.5, renderLightOrbs: true,
-  skyboxType: 'blue', indirectLighting: false, globalIllumination: false, roughness: 0.0, ballTexture: 'none', anisotropicFilter: 1
+  skyboxType: 'blue', indirectLighting: false, globalIllumination: false, roughness: 0.0, ballTexture: 'metal', anisotropicFilter: 1
 };
 
 const App: React.FC = () => {
@@ -42,6 +42,7 @@ const App: React.FC = () => {
   const menuRef = useRef<HTMLDivElement>(null);
   const menuPointerStartRef = useRef({ x: 0, y: 0 });
   const prevMenuCenterRef = useRef({ x: 0, y: 0 });
+  const wasRainEnabledRef = useRef(false);
 
   const [showCamera, setShowCamera] = useState(false);
   const [showPhysics, setShowPhysics] = useState(false);
@@ -172,18 +173,41 @@ const App: React.FC = () => {
   };
 
   const addLight = () => {
-    playUiSound();
     if (lightsRef.current.length >= 30) return;
     const cam = cameraRef.current;
     const dirX = Math.cos(cam.pitch) * Math.sin(cam.yaw);
     const dirY = Math.sin(cam.pitch);
     const dirZ = Math.cos(cam.pitch) * Math.cos(cam.yaw);
+    
+    // Calculate position 2 units away
+    const dist = 2.0;
+    const lx = cam.x + dirX * dist;
+    let ly = cam.y + dirY * dist;
+    const lz = cam.z + dirZ * dist;
+
+    if (ly < -1.0) ly = -1.0;
+
+    // Check collision with balls
+    for (const s of spheresRef.current) {
+        const dx = lx - s.x;
+        const dy = ly - s.y;
+        const dz = lz - s.z;
+        // Check squared distance vs squared radius
+        if (dx*dx + dy*dy + dz*dz < s.radius * s.radius) {
+            // Cannot spawn inside a ball
+            return;
+        }
+    }
+
+    playUiSound();
+
     const c = randomLightColor 
         ? { r: Math.random(), g: Math.random(), b: Math.random() }
         : hexToRgb(newLightColor);
     const power = Number(lightPowerPercent) || 50;
     const intensity = 15.0 * (power / 100.0);
-    lightsRef.current.push({ id: Date.now(), x: cam.x+dirX*2, y: Math.max(cam.y+dirY*2, 0.5), z: cam.z+dirZ*2, r: c.r, g: c.g, b: c.b, intensity: intensity });
+    
+    lightsRef.current.push({ id: Date.now(), x: lx, y: ly, z: lz, r: c.r, g: c.g, b: c.b, intensity: intensity });
     forceUpdate(n => n + 1);
   };
   
@@ -194,33 +218,69 @@ const App: React.FC = () => {
     const cam = cameraRef.current;
     let added = 0;
     
-    const cx = cam.x + Math.cos(cam.pitch)*Math.sin(cam.yaw)*15;
-    const cy = Math.max(cam.y + Math.sin(cam.pitch)*15, -0.5);
-    const cz = cam.z + Math.cos(cam.pitch)*Math.cos(cam.yaw)*15;
-
+    // Spawn at 5.0 for single balls, 10.0 for batches as requested
+    const spawnDist = count === 1 ? 5.0 : 10.0;
+    
     const sizePercent = Number(ballSizePercent) || 50;
-    // Allow radius to be as small as 0.01 (1%) instead of clamping to 0.1 (10%)
     const fixedRadius = Math.max(0.01, sizePercent / 100.0);
 
-    while (added < count && spheresRef.current.length < maxSpheres) {
+    let spread = 0;
+    if (count > 1) {
+        // Calculate needed volume
+        const neededSide = Math.pow(count, 1/3) * (fixedRadius * 2.1) * 2.0; 
+        spread = Math.max(8.0, neededSide); 
+        if (count > 20) spread = Math.max(15.0, neededSide);
+    }
+    
+    const dirX = Math.cos(cam.pitch) * Math.sin(cam.yaw);
+    const dirY = Math.sin(cam.pitch);
+    const dirZ = Math.cos(cam.pitch) * Math.cos(cam.yaw);
+
+    const cx = cam.x + dirX * spawnDist;
+    const cz = cam.z + dirZ * spawnDist;
+    let cy = cam.y + dirY * spawnDist;
+
+    // For batches, spawn higher to prevent floor crowding/failures
+    if (count > 1) {
+        cy = Math.max(cy, 5.0); 
+    } else {
+        cy = Math.max(cy, -0.5);
+    }
+    
+    let totalAttempts = 0;
+    const maxTotalAttempts = count * 500; // Increased attempts for higher success rate
+
+    while (added < count && spheresRef.current.length < maxSpheres && totalAttempts < maxTotalAttempts) {
         const r = fixedRadius;
         let x = 0, y = 0, z = 0;
         let valid = false;
         let attempts = 0;
         
-        while (!valid && attempts < 20) {
-            x = cx + (Math.random()-0.5)*15;
-            y = cy + (Math.random()-0.5)*15;
-            if (y < r - 1.0) y = r - 1.0;
-            z = cz + (Math.random()-0.5)*15;
+        while (!valid && attempts < 50) {
+            x = cx + (Math.random()-0.5) * spread;
+            y = cy + (Math.random()-0.5) * spread;
+            
+            // Reflect off the floor instead of clamping to prevent stacking collisions
+            if (y < r - 1.0) {
+                const diff = (r - 1.0) - y;
+                y = (r - 1.0) + diff;
+            }
+            
+            z = cz + (Math.random()-0.5) * spread;
             
             valid = true;
             for (const s of spheresRef.current) {
                 const dx = x - s.x;
                 const dy = y - s.y;
                 const dz = z - s.z;
-                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-                if (dist < r + s.radius) {
+                
+                if (Math.abs(dx) > r + s.radius) continue;
+                if (Math.abs(dy) > r + s.radius) continue;
+                if (Math.abs(dz) > r + s.radius) continue;
+
+                const distSq = dx*dx + dy*dy + dz*dz;
+                const minD = r + s.radius;
+                if (distSq < minD * minD) {
                     valid = false;
                     break;
                 }
@@ -228,16 +288,21 @@ const App: React.FC = () => {
             attempts++;
         }
 
-        const color = randomBallColor 
-            ? { r: Math.random(), g: Math.random(), b: Math.random() }
-            : hexToRgb(newBallColor);
+        if (valid) {
+            const color = randomBallColor 
+                ? { r: Math.random(), g: Math.random(), b: Math.random() }
+                : hexToRgb(newBallColor);
 
-        spheresRef.current.push({
-            id: Date.now() + Math.random(),
-            x: x, y: y, z: z,
-            radius: r, ...color, reflectivity: 0.6, vx: 0, vy: 0, vz: 0 
-        });
-        added++;
+            spheresRef.current.push({
+                id: Date.now() + Math.random(),
+                x: x, y: y, z: z,
+                radius: r, ...color, reflectivity: 0.6, vx: 0, vy: 0, vz: 0 
+            });
+            added++;
+        } else {
+            if (count === 1) break;
+        }
+        totalAttempts++;
     }
     forceUpdate(n => n + 1);
   };
@@ -481,7 +546,11 @@ const App: React.FC = () => {
       if(e) blurElement(e);
       playUiSound();
       clearFlow();
-      spheresRef.current = [{ id: 1, x: 0, y: 0, z: 3, radius: 1.0, r: 1.0, g: 1.0, b: 1.0, reflectivity: 0.5, vx: 0, vy: 0, vz: 0 }];
+      if (config.water) {
+          spheresRef.current = [];
+      } else {
+          spheresRef.current = [{ id: 1, x: 0, y: 0, z: 3, radius: 1.0, r: 1.0, g: 1.0, b: 1.0, reflectivity: 0.5, vx: 0, vy: 0, vz: 0 }];
+      }
       lightsRef.current = [];
       cameraRef.current = { x: 0, y: 1, z: -2, yaw: 0, pitch: -0.2 };
       setIsSettingFocus(false);
@@ -534,7 +603,7 @@ const App: React.FC = () => {
           } else {
               setConfig({ ...DEFAULT_CONFIG, water: false });
           }
-          setTeleportTrigger(t => t + 1);
+          setResetTrigger(t => t + 1);
       }
       lightsRef.current = [];
   };
@@ -726,7 +795,19 @@ const App: React.FC = () => {
                 <div className="space-y-0.5 animate-in fade-in duration-300 max-h-[75vh] overflow-y-auto pr-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
                 
                 <div className="space-y-0.5" onKeyDown={(e) => e.stopPropagation()}>
-                    <button tabIndex={-1} onClick={(e) => {blurElement(e); playUiSound(); setConfig(p => ({...p, raytracingEnabled: !p.raytracingEnabled, rayCount: !p.raytracingEnabled?2:1, maxBounces: !p.raytracingEnabled?3:1, reflectionIntensity: !p.raytracingEnabled?1.0:0, rain:false}))}} className={`w-full h-[49px] px-3 rounded-lg font-bold text-lg shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 mb-0 ${config.raytracingEnabled ? 'bg-green-600/80 text-white' : 'bg-gray-800 text-white'}`}><div className={`w-4 h-4 rounded-full ${config.raytracingEnabled ? 'bg-white' : 'bg-gray-600'}`} /> Raytracing : {config.raytracingEnabled ? 'ON' : 'OFF'}</button>
+                    <button tabIndex={-1} onClick={(e) => {
+                        blurElement(e); 
+                        playUiSound(); 
+                        setConfig(p => {
+                            const nextState = !p.raytracingEnabled;
+                            if (nextState) {
+                                return { ...p, raytracingEnabled: true, rayCount: 2, maxBounces: 3, reflectionIntensity: 1.0, rain: wasRainEnabledRef.current };
+                            } else {
+                                wasRainEnabledRef.current = p.rain;
+                                return { ...p, raytracingEnabled: false, rayCount: 1, maxBounces: 1, reflectionIntensity: 0, rain: false };
+                            }
+                        });
+                    }} className={`w-full h-[49px] px-3 rounded-lg font-bold text-lg shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 mb-0 ${config.raytracingEnabled ? 'bg-green-600/80 text-white' : 'bg-gray-800 text-white'}`}><div className={`w-4 h-4 rounded-full ${config.raytracingEnabled ? 'bg-white' : 'bg-gray-600'}`} /> Raytracing : {config.raytracingEnabled ? 'ON' : 'OFF'}</button>
 
                     <div className="h-0 -my-px border-none"></div>
 
@@ -956,11 +1037,6 @@ const App: React.FC = () => {
                          )}
                          
                          <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Show Orbs</label><input tabIndex={-1} type="checkbox" checked={config.renderLightOrbs} onChange={(e) => {setConfig({...config, renderLightOrbs: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-
-                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Indirect Lighting</label><input tabIndex={-1} type="checkbox" checked={config.indirectLighting} onChange={(e) => {setConfig({...config, indirectLighting: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-
-                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Global Illumination</label><input tabIndex={-1} type="checkbox" checked={config.globalIllumination} onChange={(e) => {setConfig({...config, globalIllumination: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-                         
                          <div className={`flex items-center justify-between ${!config.raytracingEnabled ? 'opacity-50' : ''}`}><label className="text-lg text-gray-400">Reflection <span className="ml-2 text-sm text-gray-500 font-bold">{Math.round(config.reflectionIntensity*100)}%</span></label><input tabIndex={-1} type="range" min="0.0" max="1.0" step="0.1" value={config.reflectionIntensity} disabled={!config.raytracingEnabled} onChange={(e) => {setConfig({...config, reflectionIntensity: parseFloat(e.target.value)}); blurElement(e)}} className={`w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400 ${!config.raytracingEnabled ? 'cursor-not-allowed' : ''}`}/></div>
                     </div>
                     )}
@@ -971,13 +1047,10 @@ const App: React.FC = () => {
                     {showPhysics && (
                     <div className="mt-2 space-y-3 pl-1">
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Attraction</label><input tabIndex={-1} type="checkbox" checked={config.attraction} onChange={(e) => {setConfig({...config, attraction: e.target.checked, blackHole: e.target.checked ? config.blackHole : false}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-                        
                         <div className={`flex items-center justify-between pl-4 ${!config.attraction ? 'hidden' : ''}`}><label className="text-lg text-gray-400">Black hole</label><input tabIndex={-1} type="checkbox" checked={config.blackHole} disabled={!config.attraction} onChange={(e) => {setConfig({...config, blackHole: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-purple-500 checked:border-purple-500 transition-colors cursor-pointer disabled:cursor-not-allowed"/></div>
-
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Gravity</label><input tabIndex={-1} type="checkbox" checked={config.gravity} onChange={(e) => {setConfig({...config, gravity: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-                        
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Bouncing <span className="ml-2 text-sm text-gray-500 font-bold">{Math.round(config.bounciness * 100)}%</span></label><input tabIndex={-1} type="range" min="0.0" max="1.0" step="0.05" value={config.bounciness} onChange={(e) => {setConfig({...config, bounciness: parseFloat(e.target.value)}); blurElement(e)}} className="w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400"/></div>
-
+                        <div className={`flex items-center justify-between ${!config.raytracingEnabled ? 'opacity-50' : ''}`}><label className="text-lg text-gray-400">Light bounces <span className="ml-2 text-sm text-gray-500 font-bold">{config.maxBounces}</span></label><input tabIndex={-1} type="range" min="1" max="10" step="1" value={config.maxBounces} disabled={!config.raytracingEnabled} onChange={(e) => {setConfig({...config, maxBounces: parseInt(e.target.value)}); blurElement(e)}} className={`w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400 ${!config.raytracingEnabled ? 'cursor-not-allowed' : ''}`}/></div>
                     </div>
                     )}
                 </div>
@@ -1036,7 +1109,7 @@ const App: React.FC = () => {
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Antialiasing</label><input tabIndex={-1} type="checkbox" checked={config.antialiasing} onChange={(e) => {setConfig({...config, antialiasing: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Shadows</label><input tabIndex={-1} type="checkbox" checked={config.shadows} onChange={(e) => {setConfig({...config, shadows: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Ambient Occlusion</label><input tabIndex={-1} type="checkbox" checked={config.ambientOcclusion} onChange={(e) => {setConfig({...config, ambientOcclusion: e.target.checked}); blurElement(e)}} className="w-5 h-5 appearance-none rounded-full border-2 border-gray-500 checked:bg-blue-400 checked:border-blue-400 transition-colors cursor-pointer"/></div>
-                        <div className="flex items-center justify-between"><label className="text-lg text-gray-400">Light bounces <span className="ml-2 text-sm text-gray-500 font-bold">{config.maxBounces}</span></label><input tabIndex={-1} type="range" min="1" max="10" step="1" value={config.maxBounces} onChange={(e) => {setConfig({...config, maxBounces: parseInt(e.target.value)}); blurElement(e)}} className="w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400"/></div>
+                        <div className={`flex items-center justify-between ${!config.raytracingEnabled ? 'opacity-50' : ''}`}><label className="text-lg text-gray-400">Light bounces <span className="ml-2 text-sm text-gray-500 font-bold">{config.maxBounces}</span></label><input tabIndex={-1} type="range" min="1" max="10" step="1" value={config.maxBounces} disabled={!config.raytracingEnabled} onChange={(e) => {setConfig({...config, maxBounces: parseInt(e.target.value)}); blurElement(e)}} className={`w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400 ${!config.raytracingEnabled ? 'cursor-not-allowed' : ''}`}/></div>
                         <div className="flex items-center justify-between"><label className="text-lg text-gray-400">LOD <span className="ml-2 text-sm text-gray-500 font-bold">{Math.round(config.renderDistance)}</span></label><input tabIndex={-1} type="range" min="50" max="500" step="10" value={config.renderDistance} onChange={(e) => {setConfig({...config, renderDistance: parseFloat(e.target.value)}); blurElement(e)}} className="w-28 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-400"/></div>
                     </div>
                     )}

@@ -1,5 +1,5 @@
 {
-  "name": "Raytracing & Physics Sim (v1.0)",
+  "name": "Raytracing & Physics Sim (v1.1)",
   "description": "A real-time WebGL raytracing and (water) physics simulation.",
   "requestFramePermissions": []
 }
